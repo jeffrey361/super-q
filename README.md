@@ -32,6 +32,7 @@ superQ 用本地 SQLite 保存行情和股票名称，运行多套选股策略�
 
 ```env
 DB_PATH=data/sequoia_v2.db
+MARKET_DATA_PROVIDER=auto
 FEISHU_WEBHOOK_URL=你的飞书 Webhook
 WECHAT_ILINK_ENABLED=true
 WECHAT_ILINK_TARGET_USER_ID=你的微信 iLink 用户 ID
@@ -75,6 +76,10 @@ main.py -> gm_order_once.py
 
 - `main.py`：行情同步或读取本地数据、运行策略、飞书/微信推送、导出 `data/gm_trade_signal.json`
 - `gm_order_once.py`：读取掘金信号、执行风控、提交仿真下单、保存账户快照
+
+行情同步默认使用 `MARKET_DATA_PROVIDER=auto`，会按 `eastmoney -> sina`
+顺序尝试，并统一写入 `date/open/high/low/close/volume/turnover` 字段。
+如果只想使用某个源，可设置为 `eastmoney` 或 `sina`。
 
 如果要指定 GM 使用的 Python：
 

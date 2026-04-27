@@ -2,16 +2,25 @@
 
 import sqlite3
 import tempfile
+import time
 from datetime import date, timedelta
 from pathlib import Path
 from unittest.mock import patch
 
 import pandas as pd
+import pytest
 from hypothesis import given, settings as h_settings
 from hypothesis import strategies as st
 
 from sequoia_x.core.config import Settings
 from sequoia_x.data.engine import DataEngine, SyncResult
+
+
+@pytest.fixture(autouse=True)
+def _disable_sync_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(time, "sleep", lambda _seconds: None)
+    monkeypatch.setenv("MARKET_DATA_PROVIDER", "auto")
+    monkeypatch.setenv("MARKET_DATA_TIMEOUT_SECONDS", "10")
 
 
 def make_engine_in(tmp_dir: str) -> tuple[DataEngine, Settings]:
@@ -103,20 +112,64 @@ def test_empty_data_returns_skip(symbol: str) -> None:
         assert count == 0
 
 
-def test_sync_symbol_only_uses_eastmoney_source() -> None:
-    """sync_symbol 只应使用东财历史行情接口，不再 fallback 到新浪/腾讯。"""
+def test_sync_symbol_falls_back_to_sina_when_eastmoney_fails() -> None:
+    """东财失败时应 fallback 到新浪，并保持写入字段完整。"""
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp_dir:
         engine, _ = make_engine_in(tmp_dir)
+        sina_df = pd.DataFrame(
+            [
+                {
+                    "date": "2026-04-24",
+                    "open": 10.0,
+                    "high": 11.0,
+                    "low": 9.8,
+                    "close": 10.5,
+                    "volume": 1000000.0,
+                    "amount": 10500000.0,
+                    "turnover": 0.03,
+                }
+            ]
+        )
 
         with (
             patch("akshare.stock_zh_a_hist", side_effect=ConnectionError("东财失败")),
-            patch("akshare.stock_zh_a_daily", side_effect=AssertionError("不应调用新浪")),
-            patch("akshare.stock_zh_a_hist_tx", side_effect=AssertionError("不应调用腾讯")),
+            patch("akshare.stock_zh_a_daily", return_value=sina_df) as sina,
+            patch("time.sleep"),
+        ):
+            result = engine.sync_symbol("000001")
+
+        assert result == SyncResult(symbol="000001", status="success", rows_added=1)
+        sina.assert_called_once()
+        with sqlite3.connect(engine.db_path) as conn:
+            row = conn.execute(
+                """
+                SELECT symbol, date, open, high, low, close, volume, turnover
+                FROM stock_daily WHERE symbol = ?
+                """,
+                ("000001",),
+            ).fetchone()
+        assert row == ("000001", "2026-04-24", 10.0, 11.0, 9.8, 10.5, 10000.0, 10500000.0)
+
+
+def test_sync_symbol_rejects_provider_missing_required_fields() -> None:
+    """行情源缺少成交额等必需字段时不应写入半残数据。"""
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp_dir:
+        engine, _ = make_engine_in(tmp_dir)
+        incomplete_df = pd.DataFrame(
+            [{"date": "2026-04-24", "open": 10.0, "high": 11.0, "low": 9.8, "close": 10.5}]
+        )
+
+        with (
+            patch.object(engine, "_providers_for_sync", return_value=["sina"]),
+            patch("akshare.stock_zh_a_daily", return_value=incomplete_df),
             patch("time.sleep"),
         ):
             result = engine.sync_symbol("000001")
 
         assert result == SyncResult(symbol="000001", status="fail", rows_added=0)
+        with sqlite3.connect(engine.db_path) as conn:
+            count = conn.execute("SELECT COUNT(*) FROM stock_daily").fetchone()[0]
+        assert count == 0
 
 
 def test_sync_all_processes_each_symbol_once(monkeypatch) -> None:
@@ -159,7 +212,16 @@ def test_akshare_failure_does_not_interrupt_sync(
                 raise ConnectionError("模拟网络超时")
             return pd.DataFrame()
 
-        with patch("akshare.stock_zh_a_hist", side_effect=mock_hist):
+        def mock_sina(symbol, **kwargs):  # type: ignore
+            if symbol[-6:] == fail_symbol:
+                raise ConnectionError("模拟新浪网络超时")
+            return pd.DataFrame()
+
+        with (
+            patch("akshare.stock_zh_a_hist", side_effect=mock_hist),
+            patch("akshare.stock_zh_a_daily", side_effect=mock_sina),
+            patch("time.sleep"),
+        ):
             summary = engine.sync_all(symbols)
 
         assert summary.failed >= 1

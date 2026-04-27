@@ -15,6 +15,11 @@ from sequoia_x.strategy.turtle_trade import TurtleTradeStrategy
 logger = get_logger(__name__)
 
 NewsItem = dict[str, Any]
+TargetedNewsFetcher = Callable[[str, list[str]], list[NewsItem]]
+
+
+def _clamp(value: float, lower: float = 0.0, upper: float = 100.0) -> float:
+    return max(lower, min(upper, value))
 
 
 class NewsConfirmStrategy(BaseStrategy):
@@ -22,25 +27,50 @@ class NewsConfirmStrategy(BaseStrategy):
 
     webhook_key: str = "news_confirm"
 
-    risk_words: tuple[str, ...] = (
+    hard_risk_words: tuple[str, ...] = (
         "立案",
         "调查",
         "减持",
+        "拟减持",
+        "减持计划",
+        "业绩预亏",
+        "财务造假",
+        "监管处罚",
+        "实控人失联",
+        "暂停上市",
+        "终止上市",
+        "退市",
+    )
+    soft_risk_words: tuple[str, ...] = (
         "预亏",
         "亏损",
+        "下滑",
         "问询函",
         "监管函",
-        "退市",
         "诉讼",
         "商誉减值",
         "解禁",
     )
+    risk_words: tuple[str, ...] = tuple(
+        dict.fromkeys([*hard_risk_words, *soft_risk_words])
+    )
     positive_event_words: dict[str, tuple[str, ...]] = {
-        "业绩": ("预增", "增长", "扭亏", "盈利", "净利"),
-        "订单": ("订单", "合同", "中标", "交付"),
-        "政策": ("政策", "补贴", "规划", "试点", "改革"),
-        "产业": ("涨价", "供需", "产能", "出口", "国产替代"),
+        "业绩": ("预增", "增长", "扭亏", "盈利", "净利", "超预期"),
+        "订单": ("订单", "合同", "中标", "交付", "定点"),
+        "政策": ("政策", "补贴", "规划", "试点", "改革", "支持"),
+        "产业": ("涨价", "供需", "产能", "出口", "国产替代", "景气"),
         "资本": ("回购", "增持", "分红", "股权激励"),
+        "评级": ("上调评级", "买入评级", "首次覆盖", "目标价"),
+        "经营": ("新产品", "量产", "扩产", "投产", "战略合作"),
+    }
+    event_weights: dict[str, int] = {
+        "业绩": 24,
+        "订单": 24,
+        "政策": 20,
+        "产业": 16,
+        "资本": 14,
+        "评级": 10,
+        "经营": 14,
     }
     theme_words: tuple[str, ...] = (
         "机器人",
@@ -57,12 +87,19 @@ class NewsConfirmStrategy(BaseStrategy):
         "医药",
         "消费",
     )
+    source_weight_keywords: tuple[tuple[tuple[str, ...], float], ...] = (
+        (("公告", "交易所", "巨潮", "cninfo", "sse", "szse", "bse"), 1.0),
+        (("东方财富", "同花顺", "财联社", "证券时报", "中国证券报", "上海证券报"), 0.8),
+        (("研报", "券商", "证券研究", "评级"), 0.7),
+        (("新浪", "腾讯", "网易", "凤凰"), 0.5),
+    )
 
     def __init__(
         self,
         *args,
         technical_strategies: list[Any] | None = None,
         news_fetcher: Callable[[], list[NewsItem]] | None = None,
+        targeted_news_fetcher: TargetedNewsFetcher | None = None,
         symbol_keywords: dict[str, list[str]] | None = None,
         now: Callable[[], pd.Timestamp] | None = None,
         **kwargs,
@@ -70,6 +107,7 @@ class NewsConfirmStrategy(BaseStrategy):
         super().__init__(*args, **kwargs)
         self.technical_strategies = technical_strategies
         self.news_fetcher = news_fetcher or self._fetch_market_news
+        self.targeted_news_fetcher = targeted_news_fetcher
         self.symbol_keywords = symbol_keywords
         self.now = now or (lambda: pd.Timestamp.now())
         self.last_scores: list[dict[str, Any]] = []
@@ -304,6 +342,91 @@ class NewsConfirmStrategy(BaseStrategy):
                 })
         return news
 
+    def _fetch_targeted_news(
+        self,
+        symbols: list[str],
+        keywords: dict[str, list[str]],
+    ) -> list[NewsItem]:
+        news: list[NewsItem] = []
+        for symbol in symbols:
+            symbol_keywords = keywords.get(symbol, [symbol])
+            if self.targeted_news_fetcher is not None:
+                try:
+                    news.extend(self.targeted_news_fetcher(symbol, symbol_keywords))
+                except Exception as exc:
+                    logger.warning(f"[{symbol}] 定向新闻拉取失败：{exc}")
+                continue
+
+            if getattr(self.settings, "news_targeted_search_enabled", False):
+                news.extend(self._fetch_searxng_symbol_news(symbol, symbol_keywords))
+        return news
+
+    def _fetch_searxng_symbol_news(self, symbol: str, keywords: list[str]) -> list[NewsItem]:
+        import requests
+
+        base_url = str(getattr(self.settings, "news_searxng_url", "") or "").strip()
+        if not base_url:
+            return []
+
+        username = str(getattr(self.settings, "news_searxng_username", "") or "")
+        password = str(getattr(self.settings, "news_searxng_password", "") or "")
+        auth = (username, password) if username or password else None
+        search_url = base_url.rstrip("/")
+        if not search_url.endswith("/search"):
+            search_url = f"{search_url}/search"
+
+        name = next((keyword for keyword in keywords if keyword and not keyword.isdigit()), symbol)
+        year = self.now().year
+        queries = (
+            f"{name} {symbol} 最新消息 {year} 股票",
+            f"{name} {symbol} 业绩 财报 股票",
+            f"{name} {symbol} 行业 政策 股票",
+            f"{name} {symbol} site:eastmoney.com",
+            f"{name} {symbol} site:10jqka.com.cn",
+        )
+        limit = max(1, int(getattr(self.settings, "news_targeted_search_limit", 3)))
+        results: list[NewsItem] = []
+        relevance_terms = [
+            term
+            for term in dict.fromkeys([symbol, *keywords])
+            if term and (term == symbol or len(term) >= 3)
+        ]
+        for query in queries:
+            try:
+                resp = requests.get(
+                    search_url,
+                    params={"q": query, "format": "json", "language": "zh-CN"},
+                    auth=auth,
+                    timeout=8,
+                )
+                resp.raise_for_status()
+                payload = resp.json()
+            except Exception as exc:
+                logger.warning(f"[{symbol}] SearXNG 搜索失败：{exc}")
+                continue
+
+            for record in (payload.get("results") or [])[:limit]:
+                title = str(record.get("title") or "")
+                content = str(record.get("content") or "")
+                if not title and not content:
+                    continue
+                url = str(record.get("url") or "")
+                searchable_text = f"{title} {content} {url}"
+                if relevance_terms and not any(
+                    term in searchable_text for term in relevance_terms
+                ):
+                    continue
+                results.append(
+                    {
+                        "source": str(record.get("engine") or "searxng"),
+                        "title": title,
+                        "content": content,
+                        "published_at": record.get("publishedDate") or record.get("published_at"),
+                        "url": url,
+                    }
+                )
+        return results
+
     def _load_symbol_keywords(self) -> dict[str, list[str]]:
         if self.symbol_keywords is not None:
             return self.symbol_keywords
@@ -381,8 +504,54 @@ class NewsConfirmStrategy(BaseStrategy):
         candidates = [*self.theme_words, *symbol_keywords]
         return list(dict.fromkeys(word for word in candidates if word and word in text))
 
-    def _risk_words_in_text(self, text: str) -> list[str]:
-        return [word for word in self.risk_words if word in text]
+    def _risk_words_in_text(self, text: str) -> dict[str, list[str]]:
+        hard = [word for word in self.hard_risk_words if word in text]
+        soft = [
+            word
+            for word in self.soft_risk_words
+            if word in text and word not in hard
+        ]
+        return {
+            "hard": list(dict.fromkeys(hard)),
+            "soft": list(dict.fromkeys(soft)),
+        }
+
+    def _source_weight(self, item: NewsItem) -> float:
+        source_text = " ".join(
+            str(item.get(key) or "")
+            for key in ("source", "title", "url")
+        ).lower()
+        for keywords, weight in self.source_weight_keywords:
+            if any(keyword.lower() in source_text for keyword in keywords):
+                return weight
+        return 0.5 if item.get("url") else 0.4
+
+    def _freshness_score(self, item: NewsItem) -> float:
+        published_at = self._parse_time(item.get("published_at"))
+        try:
+            age_days = (self.now() - pd.Timestamp(published_at)).total_seconds() / 86400
+        except Exception:
+            return 5.0
+        if age_days <= 1:
+            return 10.0
+        if age_days <= 3:
+            return 8.0
+        if age_days <= 7:
+            return 5.0
+        return 2.0
+
+    def _sentiment_score(self, matched_news: list[dict[str, Any]]) -> float:
+        positive = 0
+        negative = 0
+        for item in matched_news:
+            if item["events"]:
+                positive += 1
+            if item["hard_risks"] or item["soft_risks"]:
+                negative += 1
+        return _clamp(10 + positive * 4 - negative * 8, 0, 20)
+
+    def _event_score(self, events: list[str]) -> float:
+        return _clamp(sum(self.event_weights.get(event, 8) for event in events), 0, 30)
 
     def _score_symbol(
         self,
@@ -394,7 +563,8 @@ class NewsConfirmStrategy(BaseStrategy):
         matched_news = []
         events: list[str] = []
         themes: list[str] = []
-        risks: list[str] = []
+        hard_risks: list[str] = []
+        soft_risks: list[str] = []
         keyword_values = keywords.get(symbol, [])
         for item in news:
             text = f"{item.get('title', '')} {item.get('content', '')}"
@@ -405,27 +575,51 @@ class NewsConfirmStrategy(BaseStrategy):
             item_risks = self._risk_words_in_text(text)
             events.extend(item_events)
             themes.extend(item_themes)
-            risks.extend(item_risks)
+            hard_risks.extend(item_risks["hard"])
+            soft_risks.extend(item_risks["soft"])
             matched_news.append(
                 {
                     "title": str(item.get("title") or ""),
                     "published_at": str(item.get("published_at") or ""),
+                    "source": str(item.get("source") or ""),
                     "events": item_events,
                     "themes": item_themes,
-                    "risks": item_risks,
+                    "hard_risks": item_risks["hard"],
+                    "soft_risks": item_risks["soft"],
+                    "source_weight": self._source_weight(item),
+                    "freshness_score": self._freshness_score(item),
                 }
             )
 
         events = list(dict.fromkeys(events))
         themes = list(dict.fromkeys(themes))
-        risks = list(dict.fromkeys(risks))
-        final_score = (
-            len(matched_news) * 15
-            + len(events) * 20
-            + len(themes) * 8
-            + len(technical_sources) * 10
-            - len(risks) * 100
+        hard_risks = list(dict.fromkeys(hard_risks))
+        soft_risks = list(dict.fromkeys(soft_risks))
+        risk_penalty = len(hard_risks) * 100 + len(soft_risks) * 15
+        technical_score = _clamp(len(technical_sources) * 15, 0, 30)
+        catalyst_score = self._event_score(events)
+        theme_score = _clamp(len(themes) * 4, 0, 10)
+        sentiment_score = self._sentiment_score(matched_news)
+        freshness_score = (
+            max((item["freshness_score"] for item in matched_news), default=0.0)
         )
+        source_score = (
+            sum(item["source_weight"] for item in matched_news) / len(matched_news) * 10
+            if matched_news
+            else 0.0
+        )
+        final_score = round(
+            _clamp(
+                technical_score
+                + catalyst_score
+                + theme_score
+                + sentiment_score
+                + freshness_score
+                + source_score
+                - risk_penalty
+            )
+        )
+        risks = list(dict.fromkeys([*hard_risks, *soft_risks]))
         return {
             "symbol": symbol,
             "technical_sources": technical_sources,
@@ -433,6 +627,17 @@ class NewsConfirmStrategy(BaseStrategy):
             "events": events,
             "themes": themes,
             "risks": risks,
+            "hard_risks": hard_risks,
+            "soft_risks": soft_risks,
+            "score_parts": {
+                "technical": technical_score,
+                "catalyst": catalyst_score,
+                "theme": theme_score,
+                "sentiment": sentiment_score,
+                "freshness": freshness_score,
+                "source": source_score,
+                "risk_penalty": risk_penalty,
+            },
             "final_score": final_score,
             "reject_reason": "、".join(risks) if risks else "",
         }
@@ -456,14 +661,17 @@ class NewsConfirmStrategy(BaseStrategy):
             return ""
         lines = ["新闻确认："]
         for item in self.last_scores:
+            risks = "、".join(item.get("soft_risks") or item.get("risks") or []) or "无"
             lines.append(
                 f"{item['symbol']} 综合分 {item['final_score']} "
-                f"事件：{','.join(item['events']) or '无'} "
+                f"催化剂：{','.join(item['events']) or '无'} "
+                f"风险：{risks} "
                 f"题材：{','.join(item['themes']) or '无'}"
             )
             for news in item["matched_news"][: self.settings.news_max_items_per_stock]:
                 if news.get("title"):
-                    lines.append(f"- {news['title']}")
+                    source = f"({news['source']})" if news.get("source") else ""
+                    lines.append(f"- {source}{news['title']}")
         for item in self.rejected_scores:
             lines.append(f"{item['symbol']} 被过滤：{item.get('reject_reason') or '风险新闻'}")
         return "\n".join(lines)
@@ -484,15 +692,18 @@ class NewsConfirmStrategy(BaseStrategy):
 
         self._cache_news(self.news_fetcher())
         self._cleanup_old_news()
-        news = self._load_recent_cached_news()
         keywords = self._load_symbol_keywords()
+        targeted_news = self._fetch_targeted_news(candidates, keywords)
+        if targeted_news:
+            self._cache_news(targeted_news)
+        news = self._load_recent_cached_news()
         threshold = getattr(self.settings, "news_score_threshold", 20)
 
         for symbol in candidates:
             score = self._score_symbol(symbol, news, keywords, candidate_sources[symbol])
             if not score["matched_news"]:
                 continue
-            if score["risks"]:
+            if score["hard_risks"]:
                 self.rejected_scores.append(score)
                 continue
             if score["final_score"] >= threshold:

@@ -63,6 +63,8 @@ class DataEngine:
         """
         self.db_path: str = settings.db_path
         self.start_date: str = settings.start_date
+        self.market_data_provider: str = settings.market_data_provider.lower()
+        self.market_data_timeout_seconds: float = settings.market_data_timeout_seconds
         self._init_db()
 
     def _init_db(self) -> None:
@@ -116,9 +118,41 @@ class DataEngine:
         self,
         symbol: str,
         df: pd.DataFrame,
+        provider: str = "eastmoney",
     ) -> pd.DataFrame:
         df = df.copy()
-        col_map = {
+        if provider == "sina" and "amount" in df.columns and "turnover" in df.columns:
+            df = df.drop(columns=["turnover"])
+        col_map = self._daily_column_map(provider)
+        df = df.rename(columns=col_map)
+        df["symbol"] = symbol
+
+        keep_cols = ["symbol", "date", "open", "high", "low", "close", "volume", "turnover"]
+        missing = [column for column in keep_cols if column not in df.columns]
+        if missing:
+            raise ValueError(f"{provider} 行情缺少字段：{','.join(missing)}")
+        df = df[keep_cols]
+        df["date"] = df["date"].astype(str)
+        for column in ("open", "high", "low", "close", "volume", "turnover"):
+            df[column] = pd.to_numeric(df[column], errors="coerce")
+        if provider == "sina":
+            # 新浪 volume 单位为股；东财和现有库中 volume 使用手，保持策略输入一致。
+            df["volume"] = df["volume"] / 100
+        df = df.dropna(subset=["date", "open", "high", "low", "close", "volume", "turnover"])
+        return df
+
+    def _daily_column_map(self, provider: str) -> dict[str, str]:
+        if provider == "sina":
+            return {
+                "date": "date",
+                "open": "open",
+                "high": "high",
+                "low": "low",
+                "close": "close",
+                "volume": "volume",
+                "amount": "turnover",
+            }
+        return {
             "日期": "date",
             "开盘": "open",
             "最高": "high",
@@ -127,13 +161,47 @@ class DataEngine:
             "成交量": "volume",
             "成交额": "turnover",
         }
-        df = df.rename(columns=col_map)
-        df["symbol"] = symbol
 
-        keep_cols = ["symbol", "date", "open", "high", "low", "close", "volume", "turnover"]
-        df = df[[c for c in keep_cols if c in df.columns]]
-        df["date"] = df["date"].astype(str)
-        return df
+    def _providers_for_sync(self) -> list[str]:
+        provider = self.market_data_provider
+        if provider == "auto":
+            return ["eastmoney", "sina"]
+        if provider in {"eastmoney", "sina"}:
+            return [provider]
+        logger.warning(f"未知行情源 MARKET_DATA_PROVIDER={provider}，回退到 auto")
+        return ["eastmoney", "sina"]
+
+    def _prefixed_symbol(self, symbol: str) -> str:
+        if symbol.startswith(("6", "9")):
+            return f"sh{symbol}"
+        return f"sz{symbol}"
+
+    def _fetch_daily_frame(
+        self,
+        provider: str,
+        symbol: str,
+        start: str,
+        end: str,
+    ) -> pd.DataFrame:
+        import akshare as ak
+
+        if provider == "eastmoney":
+            return ak.stock_zh_a_hist(
+                symbol=symbol,
+                period="daily",
+                start_date=start,
+                end_date=end,
+                adjust="qfq",
+                timeout=self.market_data_timeout_seconds,
+            )
+        if provider == "sina":
+            return ak.stock_zh_a_daily(
+                symbol=self._prefixed_symbol(symbol),
+                start_date=start,
+                end_date=end,
+                adjust="qfq",
+            )
+        raise ValueError(f"不支持的行情源：{provider}")
 
     def _write_daily_frame(self, symbol: str, df: pd.DataFrame) -> int:
         rows = len(df)
@@ -151,7 +219,6 @@ class DataEngine:
         return rows
 
     def sync_symbol(self, symbol: str) -> SyncResult:
-        import akshare as ak
         import random
         import time
         from datetime import date, timedelta
@@ -171,37 +238,50 @@ class DataEngine:
             start = (last_date_obj + timedelta(days=1)).strftime("%Y%m%d")
 
         df = None
+        selected_provider = ""
+        provider_errors: list[str] = []
         max_retries = 3
-        for attempt in range(max_retries):
-            try:
-                time.sleep(random.uniform(0.1, 0.4))
-                df = ak.stock_zh_a_hist(
-                    symbol=symbol,
-                    period="daily",
-                    start_date=start,
-                    end_date=today_str,
-                    adjust="qfq",
-                )
+        for provider in self._providers_for_sync():
+            for attempt in range(max_retries):
+                try:
+                    time.sleep(random.uniform(0.1, 0.4))
+                    df = self._fetch_daily_frame(provider, symbol, start, today_str)
+                    selected_provider = provider
+                    break
+                except Exception as exc:
+                    error_str = str(exc)
+                    should_retry = (
+                        ("RemoteDisconnected" in error_str or "Connection aborted" in error_str)
+                        and attempt < max_retries - 1
+                    )
+                    if should_retry:
+                        sleep_time = (attempt + 1) * 3
+                        logger.warning(
+                            f"[{symbol}] {provider} 触发反爬，"
+                            f"蛰伏 {sleep_time} 秒后第 {attempt + 2} 次重试..."
+                        )
+                        time.sleep(sleep_time)
+                        continue
+                    provider_errors.append(f"{provider}: {error_str}")
+                    break
+            if df is not None:
                 break
-            except Exception as exc:
-                error_str = str(exc)
-                if (
-                    ("RemoteDisconnected" in error_str or "Connection aborted" in error_str)
-                    and attempt < max_retries - 1
-                ):
-                    sleep_time = (attempt + 1) * 3
-                    logger.warning(f"[{symbol}] 触发反爬，蛰伏 {sleep_time} 秒后第 {attempt + 2} 次重试...")
-                    time.sleep(sleep_time)
-                    continue
 
-                logger.warning(f"[{symbol}] akshare 拉取最终失败：{error_str}")
-                return SyncResult(symbol=symbol, status="fail")
+        if df is None:
+            logger.warning(f"[{symbol}] 行情拉取最终失败：{' | '.join(provider_errors)}")
+            return SyncResult(symbol=symbol, status="fail")
 
         if df is None or df.empty:
             return SyncResult(symbol=symbol, status="skip")
 
-        df = self._normalize_daily_frame(symbol, df)
+        try:
+            df = self._normalize_daily_frame(symbol, df, provider=selected_provider)
+        except ValueError as exc:
+            logger.warning(f"[{symbol}] {selected_provider} 行情字段不完整，跳过写入：{exc}")
+            return SyncResult(symbol=symbol, status="fail")
+
         rows = self._write_daily_frame(symbol, df)
+        logger.info(f"[{symbol}] 使用 {selected_provider} 同步 {rows} 行")
         return SyncResult(symbol=symbol, status="success", rows_added=rows)
 
     def get_all_symbols(self) -> list[str]:

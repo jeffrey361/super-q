@@ -7,6 +7,8 @@ class Settings(BaseSettings):
     db_path: str = "data/sequoia_v2.db"
     start_date: str = "2024-01-01"
     sync_market_data: bool = True
+    market_data_provider: str = "auto"
+    market_data_timeout_seconds: float = 10.0
     feishu_webhook_url: str  # 必填字段，缺失时抛出 ValidationError
     strategy_webhooks: dict[str, str] = {}
     news_lookback_days: int = 7
@@ -14,6 +16,11 @@ class Settings(BaseSettings):
     news_score_threshold: int = 20
     news_high_confidence_score: int = 80
     news_max_items_per_stock: int = 2
+    news_targeted_search_enabled: bool = False
+    news_searxng_url: str = ""
+    news_searxng_username: str = ""
+    news_searxng_password: str = ""
+    news_targeted_search_limit: int = 5
     wechat_ilink_enabled: bool = False
     wechat_ilink_target_user_id: str = ""
     wechat_ilink_state_path: str = "data/wechat_ilink_state.json"

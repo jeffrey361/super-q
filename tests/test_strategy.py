@@ -6,6 +6,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import pandas as pd
+import pytest
 from hypothesis import given, settings as h_settings
 from hypothesis import strategies as st
 
@@ -21,6 +22,12 @@ class _FixedStrategy:
 
     def run(self) -> list[str]:
         return self._selected
+
+
+@pytest.fixture(autouse=True)
+def _disable_external_news_search(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("NEWS_TARGETED_SEARCH_ENABLED", "false")
+    monkeypatch.setenv("NEWS_SEARXNG_URL", "")
 
 
 # Feature: superQ-v2, Property 9: 策略 run() 返回值类型正确
@@ -253,6 +260,105 @@ def test_news_confirm_strategy_records_risk_reject_reason() -> None:
         assert strategy.run() == []
         assert strategy.rejected_scores[0]["symbol"] == "300054"
         assert "减持" in strategy.rejected_scores[0]["reject_reason"]
+
+
+def test_news_confirm_strategy_uses_targeted_news_fetcher_for_candidates() -> None:
+    """技术候选股可通过定向新闻补充获得催化剂确认。"""
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp_dir:
+        settings = Settings(
+            db_path=str(Path(tmp_dir) / "test.db"),
+            start_date="2024-01-01",
+            feishu_webhook_url="https://example.com/hook",
+        )
+        engine = DataEngine(settings)
+
+        def targeted_fetcher(symbol: str, keywords: list[str]) -> list[dict[str, str]]:
+            assert symbol == "300054"
+            assert "鼎龙股份" in keywords
+            return [
+                {
+                    "source": "东方财富",
+                    "title": "鼎龙股份半导体材料订单增长",
+                    "content": "国产替代加速，订单持续增长",
+                    "published_at": "2026-04-24 10:00:00",
+                }
+            ]
+
+        strategy = NewsConfirmStrategy(
+            engine=engine,
+            settings=settings,
+            technical_strategies=[_FixedStrategy(["300054"])],
+            news_fetcher=lambda: [],
+            targeted_news_fetcher=targeted_fetcher,
+            symbol_keywords={"300054": ["鼎龙股份", "半导体材料"]},
+            now=lambda: pd.Timestamp("2026-04-25 10:00:00"),
+        )
+
+        assert strategy.run() == ["300054"]
+        assert strategy.last_scores[0]["matched_news"][0]["source"] == "东方财富"
+
+
+def test_news_confirm_strategy_passes_searxng_basic_auth() -> None:
+    """SearXNG 开启 Basic Auth 后，定向搜索请求应携带用户名密码。"""
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp_dir:
+        settings = Settings(
+            db_path=str(Path(tmp_dir) / "test.db"),
+            start_date="2024-01-01",
+            feishu_webhook_url="https://example.com/hook",
+            news_targeted_search_enabled=True,
+            news_searxng_url="http://searxng.example",
+            news_searxng_username="superq",
+            news_searxng_password="secret",
+            news_targeted_search_limit=1,
+        )
+        engine = DataEngine(settings)
+        strategy = NewsConfirmStrategy(
+            engine=engine,
+            settings=settings,
+            technical_strategies=[_FixedStrategy(["300054"])],
+            news_fetcher=lambda: [],
+            symbol_keywords={"300054": ["鼎龙股份"]},
+            now=lambda: pd.Timestamp("2026-04-25 10:00:00"),
+        )
+
+        class _Response:
+            def raise_for_status(self) -> None:
+                return None
+
+            def json(self) -> dict[str, list[dict[str, str]]]:
+                return {"results": []}
+
+        with patch("requests.get", return_value=_Response()) as get:
+            strategy.run()
+
+        assert get.call_args.kwargs["auth"] == ("superq", "secret")
+
+
+def test_news_confirm_strategy_soft_risk_reduces_score_without_hard_reject() -> None:
+    """软风险只扣分并保留风险提示，不应像硬风险一样直接生成反向信号。"""
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp_dir:
+        settings = Settings(
+            db_path=str(Path(tmp_dir) / "test.db"),
+            start_date="2024-01-01",
+            feishu_webhook_url="https://example.com/hook",
+        )
+        engine = DataEngine(settings)
+        strategy = NewsConfirmStrategy(
+            engine=engine,
+            settings=settings,
+            technical_strategies=[_FixedStrategy(["300054"])],
+            news_fetcher=lambda: [
+                {
+                    "title": "鼎龙股份收到问询函后订单继续增长",
+                    "content": "半导体材料订单增长，国产替代趋势延续",
+                },
+            ],
+            symbol_keywords={"300054": ["鼎龙股份", "半导体材料"]},
+        )
+
+        assert strategy.run() == ["300054"]
+        assert strategy.rejected_scores == []
+        assert "问询函" in strategy.last_scores[0]["soft_risks"]
 
 
 def test_news_confirm_strategy_cleans_old_cached_news() -> None:

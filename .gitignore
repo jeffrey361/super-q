@@ -23,6 +23,9 @@ ENV/
 .env.*
 .env copy
 
+# 本地 SearXNG 鉴权密码文件
+searxng/.htpasswd
+
 # 本地状态与交易运行产物
 data/*.log
 
