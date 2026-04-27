@@ -1,0 +1,32 @@
+{
+  "date": "2026-04-27",
+  "strategy": "NewsConfirmStrategy",
+  "symbols": [
+    "SZSE.000062",
+    "SZSE.000001",
+    "SZSE.000338"
+  ],
+  "order_cash_per_stock": 10000.0,
+  "orders": [
+    {
+      "symbol": "SZSE.000062",
+      "side": "buy",
+      "volume": 100,
+      "reason": "strategy"
+    },
+    {
+      "symbol": "SZSE.000001",
+      "side": "buy",
+      "volume": 100,
+      "reason": "strategy"
+    },
+    {
+      "symbol": "SZSE.000338",
+      "side": "buy",
+      "volume": 100,
+      "reason": "strategy"
+    }
+  ],
+  "max_positions": 5,
+  "dry_run": false
+}

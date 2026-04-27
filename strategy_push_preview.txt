@@ -1,0 +1,103 @@
+================================================================================
+策略: MaVolumeStrategy
+webhook_key: ma_volume
+选股数量: 0
+选股代码: []
+无选股结果，不会推送。
+
+================================================================================
+策略: TurtleTradeStrategy
+webhook_key: turtle
+选股数量: 1
+选股代码: ['300054']
+推送 JSON:
+{
+  "msg_type": "interactive",
+  "card": {
+    "header": {
+      "title": {
+        "tag": "plain_text",
+        "content": "📈 superQ 选股播报 | TurtleTradeStrategy"
+      },
+      "template": "blue"
+    },
+    "elements": [
+      {
+        "tag": "div",
+        "text": {
+          "tag": "lark_md",
+          "content": "**日期：** 2026-04-25\n**策略：** TurtleTradeStrategy\n**选股数量：** 1"
+        }
+      },
+      {
+        "tag": "hr"
+      },
+      {
+        "tag": "div",
+        "text": {
+          "tag": "lark_md",
+          "content": "**选股列表：**\n[鼎龙股份](https://xueqiu.com/S/SZ300054)"
+        }
+      }
+    ]
+  }
+}
+
+================================================================================
+策略: HighTightFlagStrategy
+webhook_key: flag
+选股数量: 0
+选股代码: []
+无选股结果，不会推送。
+
+================================================================================
+策略: LimitUpShakeoutStrategy
+webhook_key: shakeout
+选股数量: 0
+选股代码: []
+无选股结果，不会推送。
+
+================================================================================
+策略: UptrendLimitDownStrategy
+webhook_key: limit_down
+选股数量: 0
+选股代码: []
+无选股结果，不会推送。
+
+================================================================================
+策略: RpsBreakoutStrategy
+webhook_key: rps
+选股数量: 2
+选股代码: ['000007', '300054']
+推送 JSON:
+{
+  "msg_type": "interactive",
+  "card": {
+    "header": {
+      "title": {
+        "tag": "plain_text",
+        "content": "📈 superQ 选股播报 | RpsBreakoutStrategy"
+      },
+      "template": "blue"
+    },
+    "elements": [
+      {
+        "tag": "div",
+        "text": {
+          "tag": "lark_md",
+          "content": "**日期：** 2026-04-25\n**策略：** RpsBreakoutStrategy\n**选股数量：** 2"
+        }
+      },
+      {
+        "tag": "hr"
+      },
+      {
+        "tag": "div",
+        "text": {
+          "tag": "lark_md",
+          "content": "**选股列表：**\n[未知](https://xueqiu.com/S/SZ000007) [未知](https://xueqiu.com/S/SZ300054)"
+        }
+      }
+    ]
+  }
+}

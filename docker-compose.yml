@@ -1,0 +1,53 @@
+services:
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: superQ:latest
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+    command: ["python", "start.py"]
+
+  daemon:
+    profiles:
+      - daemon
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: superQ:latest
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+    command: ["python", "start.py", "--daemon"]
+
+  gm-order:
+    profiles:
+      - gm
+    build:
+      context: .
+      dockerfile: Dockerfile
+      args:
+        INSTALL_GM: "true"
+    image: superQ:gm
+    env_file:
+      - .env
+    environment:
+      GM_SERV_ADDR: ${GM_SERV_ADDR:-host.docker.internal:7001}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./data:/app/data
+    command: ["python", "gm_order_once.py"]
+
+  wechat-login:
+    profiles:
+      - tools
+    image: superQ:latest
+    env_file:
+      - .env
+    volumes:
+      - ./data:/app/data
+    command: ["python", "wechat_login.py"]

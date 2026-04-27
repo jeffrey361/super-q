@@ -1,0 +1,43 @@
+# Python 缓存
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+
+# 虚拟环境
+venv/
+.venv/
+.venv*/
+env/
+ENV/
+
+# IDE 配置
+.idea/
+.vscode/
+.kiro
+
+
+
+# 环境变量
+.env.*
+.env copy
+
+# 本地状态与交易运行产物
+data/*.log
+
+
+# 打包构建
+*.egg-info/
+dist/
+build/
+
+# 测试与工具缓存
+.pytest_cache/
+.ruff_cache/
+
+# 日志
+*.log
+
+# Hypothesis 测试缓存
+.hypothesis/
