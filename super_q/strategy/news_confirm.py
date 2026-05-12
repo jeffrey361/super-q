@@ -7,10 +7,10 @@ from typing import Any
 
 import pandas as pd
 
-from sequoia_x.core.logger import get_logger
-from sequoia_x.strategy.base import BaseStrategy
-from sequoia_x.strategy.rps_breakout import RpsBreakoutStrategy
-from sequoia_x.strategy.turtle_trade import TurtleTradeStrategy
+from super_q.core.logger import get_logger
+from super_q.strategy.base import BaseStrategy
+from super_q.strategy.rps_breakout import RpsBreakoutStrategy
+from super_q.strategy.turtle_trade import TurtleTradeStrategy
 
 logger = get_logger(__name__)
 
@@ -101,6 +101,7 @@ class NewsConfirmStrategy(BaseStrategy):
         news_fetcher: Callable[[], list[NewsItem]] | None = None,
         targeted_news_fetcher: TargetedNewsFetcher | None = None,
         symbol_keywords: dict[str, list[str]] | None = None,
+        insight_service: Any | None = None,
         now: Callable[[], pd.Timestamp] | None = None,
         **kwargs,
     ) -> None:
@@ -109,6 +110,9 @@ class NewsConfirmStrategy(BaseStrategy):
         self.news_fetcher = news_fetcher or self._fetch_market_news
         self.targeted_news_fetcher = targeted_news_fetcher
         self.symbol_keywords = symbol_keywords
+        self._provided_symbol_keywords = symbol_keywords is not None
+        self.symbol_theme_keywords: dict[str, list[str]] | None = None
+        self.insight_service = insight_service
         self.now = now or (lambda: pd.Timestamp.now())
         self.last_scores: list[dict[str, Any]] = []
         self.rejected_scores: list[dict[str, Any]] = []
@@ -429,7 +433,10 @@ class NewsConfirmStrategy(BaseStrategy):
 
     def _load_symbol_keywords(self) -> dict[str, list[str]]:
         if self.symbol_keywords is not None:
-            return self.symbol_keywords
+            return {
+                symbol: self._identity_keywords(symbol, values)
+                for symbol, values in self.symbol_keywords.items()
+            }
 
         keywords: dict[str, list[str]] = {}
         with sqlite3.connect(self.engine.db_path) as conn:
@@ -437,7 +444,6 @@ class NewsConfirmStrategy(BaseStrategy):
                 "SELECT symbol, name, keywords FROM stock_names"
             ).fetchall()
             alias_rows = conn.execute("SELECT symbol, alias FROM stock_aliases").fetchall()
-            concept_rows = conn.execute("SELECT symbol, concept FROM stock_concepts").fetchall()
 
         for symbol, name, keyword_text in rows:
             values = [symbol, name]
@@ -449,13 +455,55 @@ class NewsConfirmStrategy(BaseStrategy):
             keywords[symbol] = list(dict.fromkeys(values))
         for symbol, alias in alias_rows:
             keywords.setdefault(symbol, [symbol]).append(alias)
-        for symbol, concept in concept_rows:
-            keywords.setdefault(symbol, [symbol]).append(concept)
         for symbol, values in list(keywords.items()):
-            keywords[symbol] = list(dict.fromkeys(value for value in values if value))
+            keywords[symbol] = self._identity_keywords(symbol, values)
 
         self.symbol_keywords = keywords
         return keywords
+
+    def _load_symbol_theme_keywords(self) -> dict[str, list[str]]:
+        if self.symbol_theme_keywords is not None:
+            return self.symbol_theme_keywords
+        if self._provided_symbol_keywords and self.symbol_keywords is not None:
+            self.symbol_theme_keywords = {
+                symbol: list(dict.fromkeys(value for value in values if value))
+                for symbol, values in self.symbol_keywords.items()
+            }
+            return self.symbol_theme_keywords
+
+        themes: dict[str, list[str]] = {}
+        with sqlite3.connect(self.engine.db_path) as conn:
+            rows = conn.execute("SELECT symbol, keywords FROM stock_names").fetchall()
+            concept_rows = conn.execute("SELECT symbol, concept FROM stock_concepts").fetchall()
+
+        for symbol, keyword_text in rows:
+            values = [
+                part.strip()
+                for part in str(keyword_text or "").split(",")
+                if part.strip()
+            ]
+            if values:
+                themes[symbol] = values
+        for symbol, concept in concept_rows:
+            if concept:
+                themes.setdefault(symbol, []).append(concept)
+        for symbol, values in list(themes.items()):
+            themes[symbol] = list(dict.fromkeys(value for value in values if value))
+
+        self.symbol_theme_keywords = themes
+        return themes
+
+    def _identity_keywords(self, symbol: str, values: list[str]) -> list[str]:
+        """返回可用于识别股票身份的关键词，排除宽泛题材词。"""
+        candidates = [symbol, *values]
+        broad_words = set(self.theme_words)
+        return list(
+            dict.fromkeys(
+                value
+                for value in candidates
+                if value and value not in broad_words
+            )
+        )
 
     def _technical_candidates(self) -> list[str]:
         strategies = self.technical_strategies
@@ -557,7 +605,8 @@ class NewsConfirmStrategy(BaseStrategy):
         self,
         symbol: str,
         news: list[NewsItem],
-        keywords: dict[str, list[str]],
+        identity_keywords: dict[str, list[str]],
+        theme_keywords: dict[str, list[str]],
         technical_sources: list[str],
     ) -> dict[str, Any]:
         matched_news = []
@@ -565,10 +614,10 @@ class NewsConfirmStrategy(BaseStrategy):
         themes: list[str] = []
         hard_risks: list[str] = []
         soft_risks: list[str] = []
-        keyword_values = keywords.get(symbol, [])
+        keyword_values = theme_keywords.get(symbol, [])
         for item in news:
             text = f"{item.get('title', '')} {item.get('content', '')}"
-            if not self._matches_symbol(symbol, text, keywords):
+            if not self._matches_symbol(symbol, text, identity_keywords):
                 continue
             item_events = self._events_in_text(text)
             item_themes = self._themes_in_text(text, keyword_values)
@@ -656,6 +705,67 @@ class NewsConfirmStrategy(BaseStrategy):
                 sources.setdefault(symbol, []).append(name)
         return sources
 
+    def _load_insight_keywords(self, candidates: list[str]) -> dict[str, list[str]]:
+        if self.insight_service is None:
+            return {}
+        try:
+            return self.insight_service.get_symbol_keywords(candidates)
+        except Exception as exc:
+            logger.warning(f"A 股洞察关键词加载失败，跳过增强：{exc}")
+            return {}
+
+    def _load_insight_risks(self, candidates: list[str]) -> dict[str, Any]:
+        if self.insight_service is None:
+            return {}
+        risks: dict[str, Any] = {}
+        for symbol in candidates:
+            try:
+                risks[symbol] = self.insight_service.get_symbol_insight(symbol)
+            except Exception as exc:
+                logger.warning(f"[{symbol}] A 股洞察风险加载失败，跳过增强：{exc}")
+        return risks
+
+    def _merge_theme_keywords(
+        self,
+        theme_keywords: dict[str, list[str]],
+        insight_keywords: dict[str, list[str]],
+    ) -> dict[str, list[str]]:
+        merged = {symbol: list(values) for symbol, values in theme_keywords.items()}
+        for symbol, values in insight_keywords.items():
+            merged.setdefault(symbol, [])
+            merged[symbol] = list(dict.fromkeys([*merged[symbol], *values]))
+        return merged
+
+    def _apply_insight_risk(self, score: dict[str, Any], insight: Any | None) -> dict[str, Any]:
+        if insight is None:
+            return score
+        risk_flags = list(getattr(insight, "risk_flags", []) or [])
+        if not risk_flags:
+            return score
+        if bool(getattr(insight, "hard_risk", False)):
+            score["hard_risks"] = list(dict.fromkeys([*score.get("hard_risks", []), *risk_flags]))
+        else:
+            score["soft_risks"] = list(dict.fromkeys([*score.get("soft_risks", []), *risk_flags]))
+        score["risks"] = list(dict.fromkeys([*score.get("hard_risks", []), *score.get("soft_risks", [])]))
+        score["reject_reason"] = "、".join(score["risks"])
+        return score
+
+    def _insight_reject_score(self, symbol: str, technical_sources: list[str], insight: Any) -> dict[str, Any]:
+        risk_flags = list(getattr(insight, "risk_flags", []) or [])
+        return {
+            "symbol": symbol,
+            "technical_sources": technical_sources,
+            "matched_news": [],
+            "events": [],
+            "themes": list(getattr(insight, "theme_keywords", []) or []),
+            "risks": risk_flags,
+            "hard_risks": risk_flags,
+            "soft_risks": [],
+            "score_parts": {"a_share_insight_risk": -100},
+            "final_score": 0,
+            "reject_reason": "、".join(risk_flags),
+        }
+
     def news_summary_text(self) -> str:
         if not self.last_scores and not self.rejected_scores:
             return ""
@@ -693,6 +803,11 @@ class NewsConfirmStrategy(BaseStrategy):
         self._cache_news(self.news_fetcher())
         self._cleanup_old_news()
         keywords = self._load_symbol_keywords()
+        theme_keywords = self._merge_theme_keywords(
+            self._load_symbol_theme_keywords(),
+            self._load_insight_keywords(candidates),
+        )
+        insight_risks = self._load_insight_risks(candidates)
         targeted_news = self._fetch_targeted_news(candidates, keywords)
         if targeted_news:
             self._cache_news(targeted_news)
@@ -700,7 +815,20 @@ class NewsConfirmStrategy(BaseStrategy):
         threshold = getattr(self.settings, "news_score_threshold", 20)
 
         for symbol in candidates:
-            score = self._score_symbol(symbol, news, keywords, candidate_sources[symbol])
+            insight = insight_risks.get(symbol)
+            score = self._score_symbol(
+                symbol,
+                news,
+                keywords,
+                theme_keywords,
+                candidate_sources[symbol],
+            )
+            score = self._apply_insight_risk(score, insight)
+            if insight is not None and bool(getattr(insight, "hard_risk", False)) and not score["matched_news"]:
+                self.rejected_scores.append(
+                    self._insight_reject_score(symbol, candidate_sources[symbol], insight)
+                )
+                continue
             if not score["matched_news"]:
                 continue
             if score["hard_risks"]:

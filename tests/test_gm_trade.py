@@ -5,9 +5,9 @@ from pathlib import Path
 
 import pytest
 
-from sequoia_x.core.config import Settings
-from sequoia_x.trade.gm_signal import GmSignalExporter
-from sequoia_x.trade.symbols import to_gm_symbol
+from super_q.core.config import Settings
+from super_q.trade.gm_signal import GmSignalExporter
+from super_q.trade.symbols import to_gm_symbol
 
 
 @pytest.mark.parametrize(

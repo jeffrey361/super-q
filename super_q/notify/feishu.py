@@ -5,8 +5,8 @@ from datetime import date
 
 import requests
 
-from sequoia_x.core.config import Settings
-from sequoia_x.core.logger import get_logger
+from super_q.core.config import Settings
+from super_q.core.logger import get_logger
 
 logger = get_logger(__name__)
 

@@ -2,8 +2,8 @@
 
 import pandas as pd
 
-from sequoia_x.core.logger import get_logger
-from sequoia_x.strategy.base import BaseStrategy
+from super_q.core.logger import get_logger
+from super_q.strategy.base import BaseStrategy
 
 logger = get_logger(__name__)
 
@@ -21,7 +21,6 @@ class TurtleTradeStrategy(BaseStrategy):
     """
 
     webhook_key: str = "turtle"
-    _MIN_BARS: int = 21  # 至少需要 21 根 K 线（20日窗口 + 当日）
 
     def run(self) -> list[str]:
         """
@@ -29,32 +28,45 @@ class TurtleTradeStrategy(BaseStrategy):
         """
         symbols = self.engine.get_local_symbols()
         selected: list[str] = []
+        latest_date = self.engine.get_latest_date()
+        breakout_days = max(1, self.settings.turtle_breakout_days)
+        min_bars = breakout_days + 1
 
         for symbol in symbols:
             try:
                 df = self.engine.get_ohlcv(symbol)
-                if len(df) < self._MIN_BARS:
+                if len(df) < min_bars:
                     continue
 
-                # 向量化：前20日 high 的滚动最大值（不含当日，shift(1) 后取 rolling(20)）
-                df["high_20"] = df["high"].shift(1).rolling(20).max()
+                # 向量化：前 N 日 high 的滚动最大值（不含当日，shift(1) 后取 rolling(N)）
+                df["breakout_high"] = df["high"].shift(1).rolling(breakout_days).max()
+                df["vol_ma20"] = df["volume"].rolling(20).mean()
 
                 last = df.iloc[-1]
                 prev = df.iloc[-2]  # 获取昨日数据，用于对比
 
-                if pd.isna(last["high_20"]):
+                if latest_date and str(last["date"]) != latest_date:
+                    continue
+                if pd.isna(last["breakout_high"]) or pd.isna(last["vol_ma20"]):
                     continue
 
-                # 核心条件 1：突破前 20 天最高点
-                breakout = last["close"] > last["high_20"]
-                # 核心条件 2：流动性过亿
-                liquid = last["turnover"] > 100_000_000
+                # 核心条件 1：突破前 N 天最高点
+                breakout = last["close"] > last["breakout_high"]
+                # 核心条件 2：可配置流动性和量能确认
+                liquid = last["turnover"] >= self.settings.turtle_min_turnover
+                volume_confirm = (
+                    last["volume"] >= last["vol_ma20"] * self.settings.turtle_min_volume_ratio
+                )
 
                 # 【新增防守条件】拒绝郑州煤电式的高开低走大阴线！
                 is_yang = last["close"] > last["open"]   # 实体必须是阳线（红柱）
                 is_up = last["close"] > prev["close"]    # 必须是真涨，不能是假阳线
+                strong_enough = (
+                    (last["close"] - prev["close"]) / prev["close"]
+                    >= self.settings.turtle_min_daily_gain
+                )
 
-                if breakout and liquid and is_yang and is_up:
+                if breakout and liquid and volume_confirm and is_yang and is_up and strong_enough:
                     selected.append(symbol)
 
             except Exception as exc:

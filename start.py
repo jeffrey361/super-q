@@ -12,8 +12,8 @@ from urllib.parse import urlparse
 
 from dotenv import load_dotenv
 
-from sequoia_x.core.config import Settings
-from sequoia_x.core.windows_compat import patch_slow_platform_machine
+from super_q.core.config import Settings
+from super_q.core.windows_compat import patch_slow_platform_machine
 
 patch_slow_platform_machine()
 

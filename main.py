@@ -12,24 +12,26 @@ from datetime import date
 import socket
 socket.setdefaulttimeout(10.0)
 
-from sequoia_x.core.windows_compat import patch_slow_platform_machine
+from super_q.core.windows_compat import patch_slow_platform_machine
 patch_slow_platform_machine()
 
-from sequoia_x.core.config import get_settings
-from sequoia_x.core.logger import get_logger
-from sequoia_x.data.engine import DataEngine
-from sequoia_x.notify.feishu import FeishuNotifier
-from sequoia_x.notify.wechat_ilink import WechatIlinkNotifier
-from sequoia_x.strategy.base import BaseStrategy
-from sequoia_x.strategy.high_tight_flag import HighTightFlagStrategy
-from sequoia_x.strategy.limit_up_shakeout import LimitUpShakeoutStrategy
-from sequoia_x.strategy.ma_volume import MaVolumeStrategy
-from sequoia_x.strategy.news_confirm import NewsConfirmStrategy
-from sequoia_x.strategy.turtle_trade import TurtleTradeStrategy
-from sequoia_x.strategy.uptrend_limit_down import UptrendLimitDownStrategy
-from sequoia_x.strategy.rps_breakout import RpsBreakoutStrategy
-from sequoia_x.trade.gm_account import GmAccountSnapshotReader
-from sequoia_x.trade.gm_signal import GmSignalExporter
+from super_q.core.config import get_settings
+from super_q.core.logger import get_logger
+from super_q.data.a_share_insight import AShareInsightService
+from super_q.data.engine import DataEngine
+from super_q.notify.feishu import FeishuNotifier
+from super_q.notify.wechat_ilink import WechatIlinkNotifier
+from super_q.strategy.base import BaseStrategy
+from super_q.strategy.final_selection import build_final_selection, final_selection_summary
+from super_q.strategy.high_tight_flag import HighTightFlagStrategy
+from super_q.strategy.limit_up_shakeout import LimitUpShakeoutStrategy
+from super_q.strategy.ma_volume import MaVolumeStrategy
+from super_q.strategy.news_confirm import NewsConfirmStrategy
+from super_q.strategy.turtle_trade import TurtleTradeStrategy
+from super_q.strategy.uptrend_limit_down import UptrendLimitDownStrategy
+from super_q.strategy.rps_breakout import RpsBreakoutStrategy
+from super_q.trade.gm_account import GmAccountSnapshotReader
+from super_q.trade.gm_signal import GmSignalExporter
 
 
 def main() -> None:
@@ -56,6 +58,14 @@ def main() -> None:
 
         # 3. 数据同步
         engine = DataEngine(settings)
+        a_share_insight_service = None
+        if settings.a_share_insight_enabled:
+            try:
+                a_share_insight_service = AShareInsightService(engine=engine, settings=settings)
+                logger.info("A 股增强洞察已启用")
+            except Exception as exc:
+                logger.warning(f"A 股增强洞察初始化失败，已降级为关闭：{exc}")
+
         if not settings.sync_market_data:
             logger.info("SYNC_MARKET_DATA=false，跳过行情同步，直接使用本地数据跑策略")
         elif date.today().weekday() < 5:  # 周一到周五：0, 1, 2, 3, 4
@@ -83,6 +93,7 @@ def main() -> None:
                 engine=engine,
                 settings=settings,
                 technical_strategies=[turtle_strategy, rps_strategy],
+                insight_service=a_share_insight_service,
             ),
         ]
 
@@ -94,13 +105,18 @@ def main() -> None:
             db_path=settings.db_path,
         ).summary_text()
 
-        # 5. 遍历策略，有结果则推送至对应机器人
+        # 5. 遍历策略，先收集所有候选，再统一打分和推送
+        strategy_results: dict[str, list[str]] = {}
+        final_news_scores: list[dict[str, object]] = []
+        final_reverse_symbols: list[str] = []
         for strategy in strategies:
             strategy_name = type(strategy).__name__
+            strategy_result_key = _unique_strategy_result_key(strategy_name, strategy_results)
             logger.info(f"执行策略：{strategy_name}")
 
             selected: list[str] = strategy.run()
             logger.info(f"{strategy_name} 选出 {len(selected)} 只股票")
+            strategy_results[strategy_result_key] = selected
             news_scores = (
                 strategy.gm_news_scores()
                 if hasattr(strategy, "gm_news_scores")
@@ -111,41 +127,56 @@ def main() -> None:
                 if hasattr(strategy, "gm_reverse_symbols")
                 else None
             )
+            if news_scores:
+                final_news_scores = news_scores
+            if reverse_symbols:
+                final_reverse_symbols = reverse_symbols
 
-            if selected:
-                news_summary = (
-                    strategy.news_summary_text()
-                    if hasattr(strategy, "news_summary_text")
-                    else ""
-                )
-                notifier.send(
-                    symbols=selected,
-                    strategy_name=strategy_name,
-                    webhook_key=strategy.webhook_key,
-                    account_summary=account_summary,
-                    news_summary=news_summary,
-                )
-                wechat_notifier.send(
-                    symbols=selected,
-                    strategy_name=strategy_name,
-                    account_summary=account_summary,
-                    news_summary=news_summary,
-                )
-                gm_signal_exporter.export(
-                    symbols=selected,
-                    strategy_name=strategy_name,
-                    news_scores=news_scores,
-                    reverse_symbols=reverse_symbols,
-                )
-            elif reverse_symbols:
-                gm_signal_exporter.export(
-                    symbols=[],
-                    strategy_name=strategy_name,
-                    news_scores=news_scores,
-                    reverse_symbols=reverse_symbols,
-                )
-            else:
-                logger.info(f"{strategy_name} 无选股结果，跳过推送")
+        (
+            a_share_scores,
+            a_share_risk_flags,
+            a_share_hard_risk_symbols,
+        ) = _build_a_share_final_inputs(
+            strategy_results=strategy_results,
+            insight_service=a_share_insight_service,
+            settings=settings,
+            logger=logger,
+        )
+        final_selection = build_final_selection(
+            strategy_results=strategy_results,
+            news_scores=final_news_scores,
+            reverse_symbols=final_reverse_symbols,
+            max_symbols=settings.final_selection_max_symbols,
+            min_score=settings.final_selection_min_score,
+            a_share_scores=a_share_scores,
+            a_share_risk_flags=a_share_risk_flags,
+            a_share_hard_risk_symbols=a_share_hard_risk_symbols,
+        )
+        final_symbols = [item.symbol for item in final_selection]
+        logger.info(f"DailyTopSelection 最终选出 {len(final_symbols)} 只股票")
+        if final_symbols:
+            summary = final_selection_summary(final_selection)
+            notifier.send(
+                symbols=final_symbols,
+                strategy_name="DailyTopSelection",
+                webhook_key="default",
+                account_summary=account_summary,
+                news_summary=summary,
+            )
+            wechat_notifier.send(
+                symbols=final_symbols,
+                strategy_name="DailyTopSelection",
+                account_summary=account_summary,
+                news_summary=summary,
+            )
+            gm_signal_exporter.export(
+                symbols=final_symbols,
+                strategy_name="DailyTopSelection",
+                news_scores=final_news_scores,
+                reverse_symbols=[],
+            )
+        else:
+            logger.info("DailyTopSelection 无最终选股结果，跳过推送和 GM 导出")
 
     except Exception:
         try:
@@ -157,6 +188,66 @@ def main() -> None:
         sys.exit(1)
 
     logger.info("superQ-X V2 运行完成")
+
+
+def _build_a_share_final_inputs(
+    strategy_results: dict[str, list[str]],
+    insight_service: object | None,
+    settings: object,
+    logger: object,
+) -> tuple[dict[str, float], dict[str, list[str]], list[str]]:
+    """把 A 股洞察快照转换为最终评分层需要的输入。"""
+    if insight_service is None:
+        return {}, {}, []
+
+    candidate_symbols = _collect_candidate_symbols(strategy_results)
+    if not candidate_symbols:
+        return {}, {}, []
+
+    try:
+        insights = insight_service.refresh_symbols(candidate_symbols)
+    except Exception as exc:
+        logger.warning(f"A 股增强洞察刷新失败，已跳过最终评分增强：{exc}")
+        return {}, {}, []
+
+    weight = float(getattr(settings, "a_share_insight_score_weight", 1.0) or 1.0)
+    exclude_hard_risk = bool(getattr(settings, "a_share_insight_hard_risk_exclude", True))
+    a_share_scores: dict[str, float] = {}
+    a_share_risk_flags: dict[str, list[str]] = {}
+    a_share_hard_risk_symbols: list[str] = []
+
+    for symbol, insight in insights.items():
+        score = float(getattr(insight, "total_score", 0.0) or 0.0)
+        risk_flags = list(getattr(insight, "risk_flags", []) or [])
+        hard_risk = bool(getattr(insight, "hard_risk", False))
+        a_share_scores[symbol] = round(score * weight, 2)
+        if risk_flags:
+            a_share_risk_flags[symbol] = risk_flags
+        if exclude_hard_risk and hard_risk:
+            a_share_hard_risk_symbols.append(symbol)
+
+    return a_share_scores, a_share_risk_flags, a_share_hard_risk_symbols
+
+
+def _collect_candidate_symbols(strategy_results: dict[str, list[str]]) -> list[str]:
+    """按策略输出顺序去重候选股票。"""
+    symbols: list[str] = []
+    for result_symbols in strategy_results.values():
+        symbols.extend(result_symbols)
+    return list(dict.fromkeys(symbols))
+
+
+def _unique_strategy_result_key(
+    strategy_name: str,
+    strategy_results: dict[str, list[str]],
+) -> str:
+    """生成不覆盖已有策略结果的字典键。"""
+    if strategy_name not in strategy_results:
+        return strategy_name
+    index = 2
+    while f"{strategy_name}#{index}" in strategy_results:
+        index += 1
+    return f"{strategy_name}#{index}"
 
 
 if __name__ == "__main__":

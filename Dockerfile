@@ -20,7 +20,7 @@ RUN python -m pip install --upgrade pip \
     && python -m pip install akshare "pydantic-settings>=2.0" "python-dotenv>=1.0" "rich>=13.0" "pandas>=2.0" "requests>=2.31" \
     && if [ "$INSTALL_GM" = "true" ]; then python -m pip install "gm==3.0.183"; fi
 
-COPY sequoia_x ./sequoia_x
+COPY super_q ./super_q
 COPY main.py gm_order_once.py gm_sim_strategy.py wechat_login.py start.py ./
 
 CMD ["python", "start.py"]

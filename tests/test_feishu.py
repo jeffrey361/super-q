@@ -8,8 +8,8 @@ import pytest
 from hypothesis import given, settings as h_settings
 from hypothesis import strategies as st
 
-from sequoia_x.core.config import Settings
-from sequoia_x.notify.feishu import FeishuNotifier
+from super_q.core.config import Settings
+from super_q.notify.feishu import FeishuNotifier
 
 
 def make_settings(webhook_url: str = "https://example.com/default") -> Settings:
@@ -76,7 +76,7 @@ def test_notification_uses_config_url(webhook_url: str) -> None:
 def test_http_failure_logs_error(status_code: int) -> None:
     """属性 12：非 200 响应时，send() 应记录 ERROR 级别日志，不抛出异常。"""
     import logging as _logging
-    import sequoia_x.notify.feishu as feishu_module
+    import super_q.notify.feishu as feishu_module
 
     settings = make_settings()
     notifier = FeishuNotifier(settings)

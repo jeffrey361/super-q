@@ -2,8 +2,8 @@
 
 from dotenv import load_dotenv
 
-from sequoia_x.core.config import Settings
-from sequoia_x.notify.wechat_ilink import WechatIlinkClient
+from super_q.core.config import Settings
+from super_q.notify.wechat_ilink import WechatIlinkClient
 
 
 def main() -> None:

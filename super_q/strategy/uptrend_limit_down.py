@@ -2,8 +2,8 @@
 
 import pandas as pd
 
-from sequoia_x.core.logger import get_logger
-from sequoia_x.strategy.base import BaseStrategy
+from super_q.core.logger import get_logger
+from super_q.strategy.base import BaseStrategy
 
 logger = get_logger(__name__)
 

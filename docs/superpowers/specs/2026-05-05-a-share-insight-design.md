@@ -22,7 +22,7 @@
 
 ## 架构
 
-新增模块 `sequoia_x/data/a_share_insight.py`，提供 `AShareInsightService`。
+新增模块 `super_q/data/a_share_insight.py`，提供 `AShareInsightService`。
 
 服务职责：
 

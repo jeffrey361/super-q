@@ -9,7 +9,7 @@ from hypothesis import strategies as st
 @h_settings(max_examples=100)
 def test_get_logger_same_instance(name: str) -> None:
     """属性 3：对任意 name，多次调用 get_logger(name) 应返回同一 Logger 实例。"""
-    from sequoia_x.core.logger import get_logger
+    from super_q.core.logger import get_logger
     logger1 = get_logger(name)
     logger2 = get_logger(name)
     assert logger1 is logger2

@@ -10,10 +10,12 @@ import pytest
 from hypothesis import given, settings as h_settings
 from hypothesis import strategies as st
 
-from sequoia_x.core.config import Settings
-from sequoia_x.data.engine import DataEngine
-from sequoia_x.strategy.ma_volume import MaVolumeStrategy
-from sequoia_x.strategy.news_confirm import NewsConfirmStrategy
+from super_q.core.config import Settings
+from super_q.data.engine import DataEngine
+from super_q.strategy.ma_volume import MaVolumeStrategy
+from super_q.strategy.news_confirm import NewsConfirmStrategy
+from super_q.strategy.rps_breakout import RpsBreakoutStrategy
+from super_q.strategy.turtle_trade import TurtleTradeStrategy
 
 
 class _FixedStrategy:
@@ -22,6 +24,54 @@ class _FixedStrategy:
 
     def run(self) -> list[str]:
         return self._selected
+
+
+class _FakeInsight:
+    def __init__(
+        self,
+        theme_keywords: list[str] | None = None,
+        risk_flags: list[str] | None = None,
+        hard_risk: bool = False,
+    ) -> None:
+        self.theme_keywords = theme_keywords or []
+        self.risk_flags = risk_flags or []
+        self.hard_risk = hard_risk
+
+
+class _FakeInsightService:
+    def __init__(
+        self,
+        keywords: dict[str, list[str]] | None = None,
+        insights: dict[str, _FakeInsight] | None = None,
+    ) -> None:
+        self.keywords = keywords or {}
+        self.insights = insights or {}
+
+    def get_symbol_keywords(self, symbols: list[str]) -> dict[str, list[str]]:
+        return {
+            symbol: self.keywords[symbol]
+            for symbol in symbols
+            if symbol in self.keywords
+        }
+
+    def get_symbol_insight(self, symbol: str):
+        return self.insights.get(symbol, _FakeInsight())
+
+
+def _insert_daily_rows(
+    engine: DataEngine,
+    rows: list[tuple[str, str, float, float, float, float, float, float]],
+) -> None:
+    with sqlite3.connect(engine.db_path) as conn:
+        conn.executemany(
+            """
+            INSERT INTO stock_daily
+                (symbol, date, open, high, low, close, volume, turnover)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+        conn.commit()
 
 
 @pytest.fixture(autouse=True)
@@ -55,6 +105,102 @@ def test_strategy_run_returns_list_of_str(symbols: list[str]) -> None:
 
     assert isinstance(result, list)
     assert all(isinstance(s, str) and len(s) > 0 for s in result)
+
+
+def test_turtle_strategy_skips_symbols_without_latest_market_date() -> None:
+    """海龟策略不应把同步失败或停牌导致的旧日期突破混入今日信号。"""
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp_dir:
+        settings = Settings(
+            db_path=str(Path(tmp_dir) / "test.db"),
+            start_date="2024-01-01",
+            feishu_webhook_url="https://example.com/hook",
+            turtle_breakout_days=20,
+            turtle_min_turnover=100_000_000,
+            turtle_min_daily_gain=0.0,
+        )
+        engine = DataEngine(settings)
+        rows = []
+        old_dates = pd.date_range("2026-03-25", periods=21, freq="D")
+        for index, day in enumerate(old_dates):
+            close = 10.0 + index * 0.1
+            high = close + 0.2
+            if index == len(old_dates) - 1:
+                close = 20.0
+                high = 20.2
+            rows.append(
+                (
+                    "300001",
+                    day.strftime("%Y-%m-%d"),
+                    close - 0.5,
+                    high,
+                    close - 1,
+                    close,
+                    10_000,
+                    200_000_000,
+                )
+            )
+        rows.append(("300002", "2026-04-27", 10.0, 10.5, 9.5, 10.1, 10_000, 50_000_000))
+        _insert_daily_rows(engine, rows)
+
+        assert TurtleTradeStrategy(engine=engine, settings=settings).run() == []
+
+
+def test_rps_breakout_strategy_uses_configured_strict_filters() -> None:
+    """RPS 策略应支持用更高 RPS、近高点比例和成交额过滤收紧候选池。"""
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp_dir:
+        settings = Settings(
+            db_path=str(Path(tmp_dir) / "test.db"),
+            start_date="2024-01-01",
+            feishu_webhook_url="https://example.com/hook",
+            rps_period=120,
+            rps_threshold=95,
+            rps_near_high_ratio=0.98,
+            rps_min_turnover=200_000_000,
+        )
+        engine = DataEngine(settings)
+        rows = []
+        dates = pd.date_range("2025-12-28", periods=121, freq="D")
+        latest_closes = {
+            "000001": 150.0,
+            "000002": 130.0,
+            "000003": 120.0,
+        }
+        for number in range(1, 21):
+            symbol = f"{number:06d}"
+            latest_close = latest_closes.get(symbol, 80.0 + number)
+            latest_high = (
+                150.0
+                if symbol == "000001"
+                else 144.0
+                if symbol == "000002"
+                else latest_close + 2
+            )
+            for index, day in enumerate(dates):
+                if index == len(dates) - 1:
+                    close = latest_close
+                    open_price = close - 2
+                    high = latest_high
+                    turnover = 300_000_000
+                else:
+                    close = 100.0
+                    open_price = 99.5
+                    high = 101.0
+                    turnover = 120_000_000
+                rows.append(
+                    (
+                        symbol,
+                        day.strftime("%Y-%m-%d"),
+                        open_price,
+                        high,
+                        close - 1,
+                        close,
+                        10_000,
+                        turnover,
+                    )
+                )
+        _insert_daily_rows(engine, rows)
+
+        assert RpsBreakoutStrategy(engine=engine, settings=settings).run() == ["000001"]
 
 
 def test_news_confirm_strategy_keeps_technical_stock_with_positive_news() -> None:
@@ -298,6 +444,28 @@ def test_news_confirm_strategy_uses_targeted_news_fetcher_for_candidates() -> No
         assert strategy.last_scores[0]["matched_news"][0]["source"] == "东方财富"
 
 
+def test_news_confirm_strategy_does_not_match_by_theme_only() -> None:
+    """新闻只命中题材词但没有股票名称、代码或别名时，不应关联到候选股。"""
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp_dir:
+        settings = Settings(
+            db_path=str(Path(tmp_dir) / "test.db"),
+            start_date="2024-01-01",
+            feishu_webhook_url="https://example.com/hook",
+        )
+        engine = DataEngine(settings)
+        strategy = NewsConfirmStrategy(
+            engine=engine,
+            settings=settings,
+            technical_strategies=[_FixedStrategy(["300054"])],
+            news_fetcher=lambda: [
+                {"title": "机器人产业政策持续加码", "content": "机器人产业链景气度提升"},
+            ],
+            symbol_keywords={"300054": ["鼎龙股份", "机器人"]},
+        )
+
+        assert strategy.run() == []
+
+
 def test_news_confirm_strategy_passes_searxng_basic_auth() -> None:
     """SearXNG 开启 Basic Auth 后，定向搜索请求应携带用户名密码。"""
     with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp_dir:
@@ -420,3 +588,58 @@ def test_news_confirm_strategy_builds_push_summary() -> None:
         assert "300054" in summary
         assert "综合分" in summary
         assert "鼎龙股份机器人材料订单增长" in summary
+
+
+def test_news_confirm_strategy_uses_a_share_insight_theme_keywords() -> None:
+    """新闻确认应使用 A 股洞察服务提供的题材关键词增强事件识别。"""
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp_dir:
+        settings = Settings(
+            db_path=str(Path(tmp_dir) / "test.db"),
+            start_date="2024-01-01",
+            feishu_webhook_url="https://example.com/hook",
+            news_score_threshold=0,
+        )
+        engine = DataEngine(settings)
+        strategy = NewsConfirmStrategy(
+            engine=engine,
+            settings=settings,
+            technical_strategies=[_FixedStrategy(["300054"])],
+            news_fetcher=lambda: [
+                {"title": "鼎龙股份订单增长", "content": "半导体材料国产替代加速"},
+            ],
+            symbol_keywords={"300054": ["鼎龙股份"]},
+            insight_service=_FakeInsightService(
+                keywords={"300054": ["半导体材料", "国产替代"]}
+            ),
+        )
+
+        assert strategy.run() == ["300054"]
+        assert "半导体材料" in strategy.last_scores[0]["themes"]
+
+
+def test_news_confirm_strategy_rejects_a_share_insight_hard_risk() -> None:
+    """A 股洞察硬风险应让新闻候选进入拒绝列表。"""
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp_dir:
+        settings = Settings(
+            db_path=str(Path(tmp_dir) / "test.db"),
+            start_date="2024-01-01",
+            feishu_webhook_url="https://example.com/hook",
+            news_score_threshold=0,
+        )
+        engine = DataEngine(settings)
+        strategy = NewsConfirmStrategy(
+            engine=engine,
+            settings=settings,
+            technical_strategies=[_FixedStrategy(["300054"])],
+            news_fetcher=lambda: [
+                {"title": "鼎龙股份订单增长", "content": "机器人材料业务增长"},
+            ],
+            symbol_keywords={"300054": ["鼎龙股份"]},
+            insight_service=_FakeInsightService(
+                insights={"300054": _FakeInsight(risk_flags=["立案"], hard_risk=True)}
+            ),
+        )
+
+        assert strategy.run() == []
+        assert strategy.gm_reverse_symbols() == ["300054"]
+        assert strategy.rejected_scores[0]["reject_reason"] == "立案"

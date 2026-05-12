@@ -12,8 +12,8 @@ import pytest
 from hypothesis import given, settings as h_settings
 from hypothesis import strategies as st
 
-from sequoia_x.core.config import Settings
-from sequoia_x.data.engine import DataEngine, SyncResult
+from super_q.core.config import Settings
+from super_q.data.engine import DataEngine, SyncResult
 
 
 @pytest.fixture(autouse=True)
@@ -188,6 +188,55 @@ def test_sync_all_processes_each_symbol_once(monkeypatch) -> None:
         assert sorted(calls) == ["000001", "000002", "600000"]
         assert len(calls) == len(set(calls))
         assert summary.skipped == 3
+
+
+def test_get_all_symbols_excludes_qualified_markets_when_enabled() -> None:
+    """开启同步过滤后，应排除科创、北交所/新三板、可转债、退市和 ST。"""
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp_dir:
+        settings = Settings(
+            db_path=str(Path(tmp_dir) / "test.db"),
+            start_date="2024-01-01",
+            feishu_webhook_url="https://example.com/hook",
+            sync_exclude_qualified_markets=True,
+        )
+        engine = DataEngine(settings)
+        symbols = pd.DataFrame(
+            [
+                {"code": "000001", "name": "平安银行"},
+                {"code": "300750", "name": "宁德时代"},
+                {"code": "688001", "name": "华兴源创"},
+                {"code": "830799", "name": "艾融软件"},
+                {"code": "430047", "name": "诺思兰德"},
+                {"code": "123456", "name": "测试转债"},
+                {"code": "000003", "name": "退市金泰"},
+                {"code": "000004", "name": "*ST国华"},
+            ]
+        )
+
+        with patch("akshare.stock_info_a_code_name", return_value=symbols):
+            assert engine.get_all_symbols() == ["000001", "300750"]
+
+
+def test_get_all_symbols_keeps_original_list_when_qualified_filter_disabled() -> None:
+    """关闭同步过滤时，应保持 AkShare 返回列表不变。"""
+    with tempfile.TemporaryDirectory(ignore_cleanup_errors=True) as tmp_dir:
+        settings = Settings(
+            db_path=str(Path(tmp_dir) / "test.db"),
+            start_date="2024-01-01",
+            feishu_webhook_url="https://example.com/hook",
+            sync_exclude_qualified_markets=False,
+        )
+        engine = DataEngine(settings)
+        symbols = pd.DataFrame(
+            [
+                {"code": "000001", "name": "平安银行"},
+                {"code": "688001", "name": "华兴源创"},
+                {"code": "123456", "name": "测试转债"},
+            ]
+        )
+
+        with patch("akshare.stock_info_a_code_name", return_value=symbols):
+            assert engine.get_all_symbols() == ["000001", "688001", "123456"]
 
 
 # Feature: superQ-v2, Property 7: akshare 调用失败不中断整体同步

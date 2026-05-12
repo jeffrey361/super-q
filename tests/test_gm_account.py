@@ -4,7 +4,7 @@ import json
 import sqlite3
 from pathlib import Path
 
-from sequoia_x.trade.gm_account import GmAccountSnapshotReader
+from super_q.trade.gm_account import GmAccountSnapshotReader
 
 
 def test_reader_loads_account_snapshot_summary(tmp_path: Path) -> None:

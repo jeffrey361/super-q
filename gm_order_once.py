@@ -12,7 +12,7 @@ import inspect
 from dotenv import load_dotenv
 
 import gm_sim_strategy
-from sequoia_x.core.config import Settings
+from super_q.core.config import Settings
 
 try:
     from gm.api import (  # type: ignore

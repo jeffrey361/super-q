@@ -5,9 +5,9 @@ from datetime import date
 from pathlib import Path
 from typing import Callable
 
-from sequoia_x.core.config import Settings
-from sequoia_x.core.logger import get_logger
-from sequoia_x.trade.symbols import to_gm_symbol
+from super_q.core.config import Settings
+from super_q.core.logger import get_logger
+from super_q.trade.symbols import to_gm_symbol
 
 logger = get_logger(__name__)
 

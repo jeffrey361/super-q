@@ -2,8 +2,8 @@
 
 from abc import ABC, abstractmethod
 
-from sequoia_x.core.config import Settings
-from sequoia_x.data.engine import DataEngine
+from super_q.core.config import Settings
+from super_q.data.engine import DataEngine
 
 
 class BaseStrategy(ABC):

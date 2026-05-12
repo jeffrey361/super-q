@@ -8,8 +8,8 @@ from unittest.mock import MagicMock, patch
 
 import requests
 
-from sequoia_x.core.config import Settings
-from sequoia_x.notify.wechat_ilink import WechatIlinkClient, WechatIlinkNotifier
+from super_q.core.config import Settings
+from super_q.notify.wechat_ilink import WechatIlinkClient, WechatIlinkNotifier
 
 
 def make_settings(tmp_path: Path, **kwargs: object) -> Settings:

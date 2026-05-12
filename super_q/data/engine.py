@@ -7,8 +7,8 @@ from typing import Literal
 
 import pandas as pd
 
-from sequoia_x.core.config import Settings
-from sequoia_x.core.logger import get_logger
+from super_q.core.config import Settings
+from super_q.core.logger import get_logger
 
 logger = get_logger(__name__)
 
@@ -61,10 +61,12 @@ class DataEngine:
         Args:
             settings: 系统配置实例，提供 db_path 和 start_date。
         """
+        self.settings = settings
         self.db_path: str = settings.db_path
         self.start_date: str = settings.start_date
         self.market_data_provider: str = settings.market_data_provider.lower()
         self.market_data_timeout_seconds: float = settings.market_data_timeout_seconds
+        self.sync_exclude_qualified_markets: bool = settings.sync_exclude_qualified_markets
         self._init_db()
 
     def _init_db(self) -> None:
@@ -301,13 +303,56 @@ class DataEngine:
                 logger.info(f"正在获取全市场股票列表 (第 {attempt + 1}/{max_retries} 次尝试)...")
                 df = ak.stock_info_a_code_name()
                 logger.info(f"成功获取股票列表，共 {len(df)} 只股票。")
-                return df["code"].astype(str).tolist()
+                symbols = self._symbols_from_code_name_frame(df)
+                if self.sync_exclude_qualified_markets:
+                    logger.info(
+                        f"已开启同步权限过滤，保留 {len(symbols)} 只普通股票用于同步。"
+                    )
+                return symbols
             except Exception as e:
                 logger.warning(f"获取全市场列表失败: {e}。3秒后重试...")
                 time.sleep(3)
 
         logger.error("获取全市场列表最终失败！请检查网络连接。")
         return []
+
+    def _symbols_from_code_name_frame(self, df: pd.DataFrame) -> list[str]:
+        """从 AkShare 代码名称表提取同步股票列表，并按配置排除需权限品种。"""
+        code_column = "code" if "code" in df.columns else "代码"
+        name_column = "name" if "name" in df.columns else "名称"
+        symbols: list[str] = []
+        excluded = 0
+        for _, row in df.iterrows():
+            symbol = str(row.get(code_column, "")).strip().zfill(6)
+            name = str(row.get(name_column, "") or "")
+            if not symbol:
+                continue
+            if self.sync_exclude_qualified_markets and self._is_qualified_market_symbol(
+                symbol,
+                name,
+            ):
+                excluded += 1
+                continue
+            symbols.append(symbol)
+        if self.sync_exclude_qualified_markets and excluded:
+            logger.info(f"同步列表已排除需权限或高风险品种 {excluded} 只")
+        return symbols
+
+    @staticmethod
+    def _is_qualified_market_symbol(symbol: str, name: str) -> bool:
+        """判断股票是否属于需要额外权限或应避免同步的品种。"""
+        normalized_name = name.upper().replace("＊", "*").strip()
+        if symbol.startswith(("688", "689")):
+            return True
+        if symbol.startswith(("4", "8", "920")):
+            return True
+        if symbol.startswith(("110", "113", "118", "123", "127", "128")):
+            return True
+        if any(keyword in name for keyword in ("转债", "可转债", "退市", "退整理")):
+            return True
+        if name.startswith("退"):
+            return True
+        return "ST" in normalized_name
 
     def get_local_symbols(self) -> list[str]:
         """
@@ -321,6 +366,12 @@ class DataEngine:
                 "SELECT DISTINCT symbol FROM stock_daily"
             ).fetchall()
         return [row[0] for row in rows]
+
+    def get_latest_date(self) -> str | None:
+        """返回本地行情库中的全市场最新交易日期。"""
+        with sqlite3.connect(self.db_path) as conn:
+            row = conn.execute("SELECT MAX(date) FROM stock_daily").fetchone()
+        return row[0] if row and row[0] else None
 
     def sync_all(self, symbols: list[str]) -> SyncSummary:
         """

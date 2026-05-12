@@ -2,7 +2,7 @@
 
 import platform
 
-from sequoia_x.core.windows_compat import patch_slow_platform_machine
+from super_q.core.windows_compat import patch_slow_platform_machine
 
 
 def test_patch_slow_platform_machine_replaces_platform_machine(monkeypatch) -> None:

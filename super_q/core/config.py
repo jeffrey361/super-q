@@ -9,6 +9,7 @@ class Settings(BaseSettings):
     sync_market_data: bool = True
     market_data_provider: str = "auto"
     market_data_timeout_seconds: float = 10.0
+    sync_exclude_qualified_markets: bool = False
     feishu_webhook_url: str  # 必填字段，缺失时抛出 ValidationError
     strategy_webhooks: dict[str, str] = {}
     news_lookback_days: int = 7
@@ -21,6 +22,23 @@ class Settings(BaseSettings):
     news_searxng_username: str = ""
     news_searxng_password: str = ""
     news_targeted_search_limit: int = 5
+    strategy_notify_max_symbols: int = 30
+    turtle_breakout_days: int = 55
+    turtle_min_turnover: float = 200_000_000
+    turtle_min_daily_gain: float = 0.02
+    turtle_min_volume_ratio: float = 1.2
+    rps_period: int = 120
+    rps_threshold: float = 95
+    rps_near_high_ratio: float = 0.98
+    rps_min_turnover: float = 200_000_000
+    rps_require_positive_day: bool = True
+    final_selection_max_symbols: int = 5
+    final_selection_min_score: float = 60
+    a_share_insight_enabled: bool = True
+    a_share_insight_cache_hours: int = 8
+    a_share_insight_score_weight: float = 1.0
+    a_share_insight_hard_risk_exclude: bool = True
+    a_share_insight_request_timeout_seconds: float = 10.0
     wechat_ilink_enabled: bool = False
     wechat_ilink_target_user_id: str = ""
     wechat_ilink_state_path: str = "data/wechat_ilink_state.json"
@@ -43,7 +61,7 @@ class Settings(BaseSettings):
     gm_serv_addr: str = ""
     gm_order_cash_per_stock: float = 10000
     gm_buy_volume: int = 100
-    gm_news_high_confidence_buy_volume: int = 150
+    gm_news_high_confidence_buy_volume: int = 200
     gm_max_order_value: float = 0
     gm_max_positions: int = 5
     gm_daily_order_limit: int = 0
