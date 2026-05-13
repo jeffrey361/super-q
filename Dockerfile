@@ -21,6 +21,7 @@ RUN python -m pip install --upgrade pip \
     && if [ "$INSTALL_GM" = "true" ]; then python -m pip install "gm==3.0.183"; fi
 
 COPY super_q ./super_q
-COPY main.py gm_order_once.py gm_sim_strategy.py wechat_login.py start.py ./
+COPY scripts ./scripts
+COPY main.py gm_order_once.py gm_sim_strategy.py start.py ./
 
 CMD ["python", "start.py"]

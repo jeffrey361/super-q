@@ -1,6 +1,7 @@
 $ErrorActionPreference = "Stop"
 
-$Root = Split-Path -Parent $MyInvocation.MyCommand.Path
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$Root = Split-Path -Parent $ScriptDir
 $DataDir = Join-Path $Root "data"
 $PidFile = Join-Path $DataDir "superq_daemon.pid"
 $OutLog = Join-Path $DataDir "superq_daemon.out.log"

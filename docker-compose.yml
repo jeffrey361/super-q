@@ -50,4 +50,4 @@ services:
       - .env
     volumes:
       - ./data:/app/data
-    command: ["python", "wechat_login.py"]
+    command: ["python", "scripts/wechat_login.py"]

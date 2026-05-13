@@ -17,8 +17,6 @@ ENV/
 .vscode/
 .kiro
 
-
-
 # 环境变量
 .env
 .env.*
@@ -35,18 +33,26 @@ data/*.db
 data/*.sqlite
 data/*.sqlite3
 data/*
+*.pid
 
 # 打包构建
 *.egg-info/
+sequoia_x.egg-info/
 dist/
 build/
 
 # 测试与工具缓存
 .pytest_cache/
 .ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
 
 # 日志
 *.log
+network_pull.*.log
+logs/*
+!logs/.gitkeep
 
 # Hypothesis 测试缓存
 .hypothesis/

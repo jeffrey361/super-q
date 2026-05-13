@@ -158,25 +158,25 @@ main.py -> gm_order_once.py
 启动常驻任务：
 
 ```powershell
-.\start_superq.ps1
+.\scripts\start_superq.ps1
 ```
 
 或双击：
 
 ```text
-start_superq.bat
+scripts\start_superq.bat
 ```
 
 停止常驻任务和掘金客户端：
 
 ```powershell
-.\stop_superq.ps1
+.\scripts\stop_superq.ps1
 ```
 
 或双击：
 
 ```text
-stop_superq.bat
+scripts\stop_superq.bat
 ```
 
 运行日志默认写入：
@@ -190,7 +190,7 @@ data/superq_daemon.err.log
 
 ```powershell
 $env:START_RUN_TIME="14:50:00"
-.\start_superq.ps1
+.\scripts\start_superq.ps1
 ```
 
 ## 微信 iLink 登录
@@ -198,7 +198,7 @@ $env:START_RUN_TIME="14:50:00"
 首次使用或登录失效时运行：
 
 ```powershell
-.\.venv\Scripts\python.exe .\wechat_login.py
+.\.venv\Scripts\python.exe .\scripts\wechat_login.py
 ```
 
 扫码确认后，给 bot 发一条任意消息，让程序缓存 `contextToken`。
@@ -308,9 +308,6 @@ superQ/
 ├── main.py                    # 策略、推送、GM 信号导出
 ├── gm_order_once.py           # 掘金一键下单
 ├── gm_sim_strategy.py         # 掘金环境策略脚本
-├── wechat_login.py            # 微信 iLink 登录
-├── start_superq.ps1           # Windows 常驻启动脚本
-├── stop_superq.ps1            # Windows 常驻停止脚本
 ├── Dockerfile
 ├── docker-compose.yml
 ├── pyproject.toml
@@ -319,6 +316,18 @@ superQ/
 ├── NOTICE.md
 ├── README.md
 ├── data/                      # 数据库、状态、GM 信号和快照
+├── logs/                      # 根目录日志归档占位
+├── scripts/                   # Windows 启停和辅助工具脚本
+│   ├── start_superq.ps1
+│   ├── stop_superq.ps1
+│   ├── start_superq.bat
+│   ├── stop_superq.bat
+│   └── wechat_login.py
+├── integrations/
+│   └── legacy/                # 历史集成适配器归档
+├── docs/
+│   ├── notes/                 # 项目资料、模板和推送预览
+│   └── superpowers/           # 设计和实施计划
 └── super_q/
     ├── core/                  # 配置和日志
     ├── data/                  # 数据引擎和 A 股洞察

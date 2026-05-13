@@ -23,4 +23,4 @@ network_pull.err.log
 tests/
 README.md
 uv.lock
-weixin.py
+integrations/
